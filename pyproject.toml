@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "purrkey"
+version = "0.1.0"
+description = "Official Python SDK for Purrkey: find, price and run 1,100+ pay-per-call data tools for AI agents."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Purrkey", email = "support@purrkey.app" }]
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.25,<1", "typing_extensions>=4.7"]
+keywords = ["purrkey", "ai-agents", "mcp", "api", "scraping", "social-media", "sdk"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://purrkey.app"
+Documentation = "https://purrkey.app/docs"
+Repository = "https://github.com/purrkey/purrkey-python"
+Issues = "https://github.com/purrkey/purrkey-python/issues"
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "mypy>=1.13",
+  "datamodel-code-generator==0.99.0; python_version >= '3.11'",
+  "pyyaml>=6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/purrkey"]
+
+[tool.mypy]
+strict = true
+files = ["src/purrkey"]

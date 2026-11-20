@@ -1,0 +1,22 @@
+name: release
+
+# Publishes to PyPI when a GitHub release is published. Uses PyPI trusted
+# publishing (OIDC), so the repository holds no PyPI token.
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Check the tag matches pyproject.toml
+        run: test "v$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)" = "${{ github.event.release.tag_name }}"
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1

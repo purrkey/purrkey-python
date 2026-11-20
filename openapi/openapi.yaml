@@ -1,0 +1,1425 @@
+openapi: 3.0.3
+info:
+  title: Purrkey HTTP API
+  version: 0.4.3
+  description: Purrkey 工具平台契约，查询、生成、转换共用发现、检查、Run、结果交付与计费；支持账户余额调用及 x402 USDC 按次付款与 SIWX 取回。inspect 必须返回 behavior 和 delivery，available 结果必须返回 deliveryUntil；已开放工具由目录与 inspect 表达，TinyFish 浏览器可交付受限的会话资源。金额均为字段所示币种的微单位整数字符串，时间为 UTC RFC3339。标记 x-internal 的操作（支付渠道回调、本地测试渠道、网页会话专用的账户管理）仍由服务端实现，但不进入网站公开发布的契约。
+servers:
+  - url: https://api.purrkey.app
+    description: 生产 API；用户网站为 https://purrkey.app
+security:
+  - BearerAuth: []
+paths:
+  /v1/rankings:
+    get:
+      operationId: getPublicRankings
+      summary: 匿名读取按唯一 Run 统计的产品排行榜
+      security: []
+      parameters:
+        - name: period
+          in: query
+          schema:
+            $ref: "#/components/schemas/RankingPeriod"
+      responses:
+        "200":
+          description: 全部 Run 为分母，前十产品；无调用返回空数组
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicRankings"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/catalog:
+    get:
+      operationId: getPublicCatalog
+      summary: 匿名读取平台目录与全量分类数量；仅静态读取，不采购
+      security: []
+      parameters:
+        - name: category
+          in: query
+          schema:
+            type: string
+            maxLength: 100
+        - name: q
+          in: query
+          schema:
+            type: string
+            maxLength: 200
+      responses:
+        "200":
+          description: 平台按 endpoint 数降序、ID 升序；总数与分类计数不受筛选影响
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicCatalog"
+        default:
+          $ref: "#/components/responses/Error"
+  "/v1/catalog/{platform}/endpoints":
+    get:
+      operationId: getPublicEndpoints
+      summary: 匿名按平台、分组和关键词分页读取版本合并卡片与已有价格
+      security: []
+      parameters:
+        - name: platform
+          in: path
+          required: true
+          schema:
+            type: string
+            maxLength: 100
+        - name: group
+          in: query
+          schema:
+            type: string
+            maxLength: 100
+        - name: q
+          in: query
+          schema:
+            type: string
+            maxLength: 200
+        - name: order
+          in: query
+          description: "With provider order, alternate sources while preserving card ID order within each source. The default is card ID order."
+          schema:
+            type: string
+            enum:
+              - id
+              - provider
+            default: id
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: 默认按卡片 ID；可选按来源交替显示。total 为筛选后的卡片数，endpointCount 为原始接口数；未知价格省略
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicEndpointPage"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/x402/runs:
+    post:
+      operationId: submitWalletRun
+      summary: x402 USDC 按次付款；不使用账户余额
+      security: []
+      parameters:
+        - name: PAYMENT-SIGNATURE
+          description: Base64 凭证最多 64 KiB，解码并规范化后的 JSON 最多 48 KiB。
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunRequest"
+      responses:
+        "200":
+          description: 原调用或已完成的付款调用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        "202":
+          description: 查询原 Run；不重新付款
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        "402":
+          description: 固定报价和付款挑战，PAYMENT-REQUIRED Header 为标准 x402 v2 编码
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletChallenge"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/x402/siwx/challenges:
+    post:
+      operationId: createWalletReadChallenge
+      summary: 生成绑定指定 Run 的一次性 SIWX EVM 读取挑战
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - runId
+                - address
+              properties:
+                runId:
+                  type: string
+                  minLength: 1
+                address:
+                  type: string
+                  pattern: "^0x[0-9a-fA-F]{40}$"
+      responses:
+        "200":
+          description: 对原文签名后使用 SIWX Header 读取，不付款
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - message
+                  - expiresAt
+                  - payload
+                properties:
+                  message:
+                    type: string
+                  expiresAt:
+                    type: string
+                    format: date-time
+                  payload:
+                    type: object
+                    additionalProperties: true
+                    description: 标准 SIWX 字段；签名后仅补充 signature 并 base64 编码
+        default:
+          $ref: "#/components/responses/Error"
+  "/v1/x402/runs/{runId}":
+    get:
+      operationId: getWalletRun
+      summary: 原付款钱包凭 SIWX 取回原 Run；不重新付款
+      security: []
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: SIGN-IN-WITH-X
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 当前 Run 和已确认付款后可交付的结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/providers:
+    get:
+      operationId: listProviders
+      summary: 列出有权访问的供应商及完整分类和端点数
+      description: 要求 catalog:read。仅返回至少有一个可访问已上架端点的供应商，端点数不受工具分页影响；按名称及供应商 ID 稳定排序，不调用上游或嵌入模型。
+      responses:
+        "200":
+          description: 完整供应商目录
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderCatalog"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/tools:
+    get:
+      operationId: listTools
+      summary: 浏览已上线且有权访问的工具目录
+      description: 游标只适用于相同的 providerId、category、账户和工具授权范围。可改变 limit。收到 422 invalid_cursor 时省略 cursor 并从首页重新开始。
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolPage"
+        default:
+          $ref: "#/components/responses/Error"
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - name: providerId
+          in: query
+          schema:
+            type: string
+        - name: category
+          in: query
+          schema:
+            type: string
+  /v1/discover:
+    post:
+      operationId: discoverTools
+      summary: 按自然语言推荐候选工具，不扣工具额度
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiscoverResponse"
+        default:
+          $ref: "#/components/responses/Error"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DiscoverRequest"
+  /v1/inspect:
+    post:
+      operationId: inspectTool
+      summary: 取得工具固定版本的契约与价格
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolInspection"
+        default:
+          $ref: "#/components/responses/Error"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InspectRequest"
+  /v1/runs:
+    post:
+      operationId: submitRun
+      summary: 提交账户余额调用；相同幂等身份返回原 Run
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        "202":
+          description: 已受理但尚未完成；查询原 runId，不创建新调用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        default:
+          $ref: "#/components/responses/Error"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunRequest"
+    get:
+      operationId: listRuns
+      summary: 列出当前个人账户的调用，列表不加载结果正文
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunPage"
+        default:
+          $ref: "#/components/responses/Error"
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/RunStatus"
+        - name: activeOnly
+          in: query
+          schema:
+            type: boolean
+        - name: toolId
+          in: query
+          schema:
+            type: string
+        - name: createdFrom
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: createdTo
+          in: query
+          schema:
+            type: string
+            format: date-time
+  "/v1/runs/{runId}":
+    get:
+      operationId: getRun
+      summary: 读取原 Run 和当前可交付结果；读取不扣费
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        default:
+          $ref: "#/components/responses/Error"
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+  "/v1/runs/{runId}/cancel":
+    post:
+      operationId: cancelRun
+      summary: 申请取消；返回状态不代表供应商已经停止
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        "202":
+          description: 取消请求已记录，继续查询原 Run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        default:
+          $ref: "#/components/responses/Error"
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+  /v1/balance:
+    get:
+      operationId: getBalance
+      summary: 读取当前账户余额与预留
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Balance"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Clerk 会话 Token 或平台 API Key；服务端分别验证凭证并执行 scope、Workspace 归属。标记仅网页会话的管理操作不接受 API Key／MCP Token。
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+      description: 不透明游标；末页 nextCursor 为 null。
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+  responses:
+    Error:
+      description: 错误；HTTP 401/403/404/409/422/429/503 等状态按错误语义返回，不能用 200 包装失败。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    RankingPeriod:
+      type: string
+      enum:
+        - today
+        - week
+        - month
+      default: week
+    PublicRankings:
+      type: object
+      additionalProperties: false
+      required:
+        - period
+        - startAt
+        - endAt
+        - previousStartAt
+        - previousEndAt
+        - totalCalls
+        - previousTotalCalls
+        - growthPercent
+        - items
+      properties:
+        period:
+          $ref: "#/components/schemas/RankingPeriod"
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        previousStartAt:
+          type: string
+          format: date-time
+        previousEndAt:
+          type: string
+          format: date-time
+        previousTotalCalls:
+          type: integer
+          format: int64
+          minimum: 0
+        growthPercent:
+          $ref: "#/components/schemas/RankingGrowthPercent"
+        totalCalls:
+          type: integer
+          format: int64
+          minimum: 0
+        items:
+          type: array
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/RankingProduct"
+    RankingGrowthPercent:
+      type: number
+      format: double
+      nullable: true
+      description: 后端计算的未舍入百分数 (本期-对比期)/对比期*100；对比期为零时 null
+    RankingProduct:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - calls
+        - previousCalls
+        - growthPercent
+        - share
+        - change
+        - trend
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        platformId:
+          type: string
+        iconUrl:
+          type: string
+        endpointCount:
+          type: integer
+          minimum: 0
+        calls:
+          type: integer
+          format: int64
+          minimum: 0
+        previousCalls:
+          type: integer
+          format: int64
+          minimum: 0
+        growthPercent:
+          $ref: "#/components/schemas/RankingGrowthPercent"
+        share:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 100
+        change:
+          type: integer
+          nullable: true
+          description: 上期全榜名次减本期名次；上期无调用为 null
+        trend:
+          type: array
+          minItems: 7
+          maxItems: 7
+          description: 截至今日的七个 UTC 自然日调用数，今日为部分日
+          items:
+            type: integer
+            format: int64
+            minimum: 0
+    CatalogCount:
+      type: object
+      required:
+        - id
+        - name
+        - endpointCount
+        - cardCount
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        endpointCount:
+          type: integer
+          minimum: 0
+        cardCount:
+          type: integer
+          minimum: 0
+    CatalogSource:
+      type: object
+      required:
+        - providerId
+        - name
+      properties:
+        providerId:
+          type: string
+        name:
+          type: string
+        iconUrl:
+          type: string
+          description: 供应商本地图标路径，以网站源为基准；缺失或加载失败时显示名称首字母。
+    CatalogPlatform:
+      type: object
+      required:
+        - id
+        - name
+        - description
+        - category
+        - endpointCount
+        - cardCount
+        - providers
+        - groups
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        iconUrl:
+          type: string
+          description: 平台本地图标路径，以网站源为基准；缺失或加载失败时显示名称首字母。
+        description:
+          type: string
+        category:
+          type: string
+        endpointCount:
+          type: integer
+          minimum: 0
+        cardCount:
+          type: integer
+          minimum: 0
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogSource"
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogCount"
+    PublicCatalog:
+      type: object
+      required:
+        - endpointCount
+        - platformCount
+        - providerCount
+        - categories
+        - platforms
+      properties:
+        endpointCount:
+          type: integer
+          minimum: 0
+        platformCount:
+          type: integer
+          minimum: 0
+        providerCount:
+          type: integer
+          minimum: 0
+        categories:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogCount"
+        platforms:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogPlatform"
+    CatalogEndpointVersion:
+      type: object
+      required:
+        - toolId
+        - name
+        - method
+        - path
+      properties:
+        toolId:
+          type: string
+        name:
+          type: string
+        method:
+          type: string
+        path:
+          type: string
+        price:
+          $ref: "#/components/schemas/Price"
+    CatalogEndpoint:
+      type: object
+      required:
+        - id
+        - name
+        - description
+        - group
+        - provider
+        - versions
+      properties:
+        id:
+          type: string
+          description: "A real tool ID selected from versions (the first in tool ID order), never a synthetic version-stripped ID. Use versions[].toolId to select a specific version and inspect it before execution."
+        name:
+          type: string
+        description:
+          type: string
+        group:
+          type: string
+        provider:
+          $ref: "#/components/schemas/CatalogSource"
+        versions:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/CatalogEndpointVersion"
+        price:
+          allOf:
+            - $ref: "#/components/schemas/Price"
+          description: 仅全部版本都有相同币种、单价和计价单位时返回，否则省略；版本各自保留已有价格
+    PublicEndpointPage:
+      type: object
+      required:
+        - platform
+        - items
+        - total
+        - endpointCount
+        - nextCursor
+      properties:
+        platform:
+          $ref: "#/components/schemas/CatalogPlatform"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogEndpoint"
+        total:
+          type: integer
+          minimum: 0
+        endpointCount:
+          type: integer
+          minimum: 0
+        nextCursor:
+          type: string
+          nullable: true
+    WalletPayment:
+      type: object
+      required:
+        - paymentOrderId
+        - status
+        - network
+        - asset
+        - amountMicros
+      properties:
+        paymentOrderId:
+          type: string
+        status:
+          type: string
+          enum:
+            - CHALLENGED
+            - AUTHORIZED
+            - SETTLING
+            - UNKNOWN
+            - PAID
+            - FAILED
+            - CANCELED
+        network:
+          type: string
+        asset:
+          type: string
+        amountMicros:
+          $ref: "#/components/schemas/Micros"
+        transaction:
+          type: string
+        refundStatus:
+          type: string
+          enum:
+            - REVIEW
+            - CONFIRMED
+        refundTransaction:
+          type: string
+    WalletChallenge:
+      type: object
+      required:
+        - paymentOrderId
+        - paymentRequired
+      properties:
+        paymentOrderId:
+          type: string
+        paymentRequired:
+          type: object
+          additionalProperties: true
+          description: 标准 x402 v2 PaymentRequired；金额是所选 USDC 最小单位整数字符串。
+    Micros:
+      type: string
+      pattern: "^[0-9]+$"
+      description: 所示币种的微单位整数字符串；USD 和 USDC 均为 1000000 微单位。禁止使用 JS Number 计算。
+    SignedMicros:
+      type: string
+      pattern: "^-?[0-9]+$"
+      description: 可带负号的 USD 微单位整数字符串。
+    Error:
+      type: object
+      required:
+        - requestId
+        - error
+      properties:
+        requestId:
+          type: string
+        error:
+          type: object
+          required:
+            - code
+            - message
+            - retryable
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            retryable:
+              type: boolean
+            details:
+              type: object
+              additionalProperties: true
+    Balance:
+      type: object
+      required:
+        - currency
+        - balanceMicros
+        - availableMicros
+        - heldMicros
+        - paidCallsAllowed
+        - asOf
+      properties:
+        currency:
+          type: string
+          enum:
+            - USD
+        balanceMicros:
+          $ref: "#/components/schemas/SignedMicros"
+        availableMicros:
+          $ref: "#/components/schemas/Micros"
+        heldMicros:
+          $ref: "#/components/schemas/Micros"
+        paidCallsAllowed:
+          type: boolean
+        asOf:
+          type: string
+          format: date-time
+    Price:
+      type: object
+      required:
+        - priceRevision
+        - currency
+        - unit
+        - description
+        - validUntil
+      properties:
+        priceRevision:
+          type: string
+        currency:
+          type: string
+          enum:
+            - USD
+            - USDC
+        unit:
+          type: string
+          description: 计价单位；只有单位和能力相同才可比较单价。successful_url 按成功 URL 计价，须覆盖全部提交的 URL。credit 按工具说明的上游积分计费，须覆盖请求上限。tenth_credit 以 0.1 个上游积分为单位，单价是 0.1 积分的价格，按工具说明的积分计费，须覆盖请求上限。max_call 是按供应商回执实扣的单次费用上限。executed_step 按已确认执行步骤计费，含失败和取消，须覆盖步数及公布的收尾余量。browser_minute 按确认的租赁用量结算，须覆盖请求的租赁分钟数。
+        unitPriceMicros:
+          $ref: "#/components/schemas/Micros"
+        description:
+          type: string
+          description: 版本化计费规则的人类可读说明；非固定单价时不伪造 unitPriceMicros。
+        validUntil:
+          type: string
+          format: date-time
+    Freshness:
+      type: object
+      description: 目录中的缓存摘要；cacheEnabled 必须与 inspect 的 behavior.cacheScope 一致，不代表在途合并许可，也不用于描述生成产物有效期。
+      required:
+        - cacheEnabled
+        - description
+      properties:
+        cacheEnabled:
+          type: boolean
+        maxAgeSeconds:
+          type: integer
+          format: int32
+          minimum: 0
+          description: 仅缓存启用时提供的有效 TTL；生成时间、文件有效期及交付窗口另行表达。
+        description:
+          type: string
+    Health:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - healthy
+            - stable
+            - degraded
+            - outage
+            - unknown
+        typicalDurationMs:
+          type: integer
+          format: int32
+          minimum: 0
+        tailDurationMs:
+          type: integer
+          format: int32
+          minimum: 0
+        observedAt:
+          type: string
+          format: date-time
+    Provider:
+      type: object
+      required:
+        - providerId
+        - name
+        - description
+        - categories
+        - endpointCount
+      properties:
+        providerId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        iconUrl:
+          type: string
+          description: 供应商公开图标 URL；相对路径以网站源为基准，缺失时界面显示名称缩写。
+        categories:
+          type: array
+          items:
+            type: string
+          description: 供应商能力分类，独立于端点的平台与业务标签。
+        endpointCount:
+          type: integer
+          minimum: 1
+          description: 当前凭证可访问的已上架端点数，不包含撤下的工具版本。
+    ProviderCatalog:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Provider"
+    Tool:
+      type: object
+      required:
+        - toolId
+        - toolRevision
+        - providerId
+        - name
+        - description
+        - categories
+        - dataPlatforms
+        - price
+        - freshness
+        - health
+      properties:
+        toolId:
+          type: string
+        toolRevision:
+          type: string
+        providerId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        categories:
+          type: array
+          items:
+            type: string
+        dataPlatforms:
+          type: array
+          items:
+            type: string
+        perRunPrice:
+          $ref: "#/components/schemas/Price"
+        price:
+          $ref: "#/components/schemas/Price"
+        freshness:
+          $ref: "#/components/schemas/Freshness"
+        health:
+          $ref: "#/components/schemas/Health"
+    ToolPage:
+      type: object
+      required:
+        - items
+        - nextCursor
+        - catalogVersion
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Tool"
+        nextCursor:
+          type: string
+          nullable: true
+        catalogVersion:
+          type: string
+    DiscoverRequest:
+      type: object
+      required:
+        - query
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 5
+        providerId:
+          type: string
+        category:
+          type: string
+    Candidate:
+      type: object
+      required:
+        - tool
+        - rank
+        - matchReasons
+        - limitations
+      properties:
+        tool:
+          $ref: "#/components/schemas/Tool"
+        rank:
+          type: integer
+          minimum: 1
+        relevance:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 当前版本相对排序值，不是答案正确率；不同检索模式不直接比较。
+        matchReasons:
+          type: array
+          items:
+            type: string
+        limitations:
+          type: array
+          items:
+            type: string
+    DiscoverResponse:
+      type: object
+      required:
+        - requestId
+        - catalogVersion
+        - retrievalMode
+        - semanticCoverage
+        - candidates
+      properties:
+        requestId:
+          type: string
+        catalogVersion:
+          type: string
+        retrievalMode:
+          type: string
+          enum:
+            - hybrid
+            - keyword_fallback
+        semanticCoverage:
+          type: string
+          enum:
+            - complete
+            - partial
+            - unavailable
+        degradationReason:
+          type: string
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/Candidate"
+    InspectRequest:
+      type: object
+      required:
+        - toolId
+      properties:
+        toolId:
+          type: string
+        toolRevision:
+          type: string
+    ToolInspection:
+      type: object
+      description: 固定版本的工具契约；behavior 与 delivery 由服务端发布定义解析，调用者不能覆盖。工具 outputSchema 只约束业务 output，文件引用另遵循 ResultArtifact；limitations 说明必需产物及部分成功规则。
+      required:
+        - tool
+        - inputSchema
+        - outputSchema
+        - inputExamples
+        - limitations
+        - supportsCancel
+        - behavior
+        - delivery
+      properties:
+        tool:
+          $ref: "#/components/schemas/Tool"
+        inputSchema:
+          type: object
+          additionalProperties: true
+          description: 作为数据返回的 JSON Schema 2020-12，不作为 OpenAPI 3.0 Schema 编译。
+        outputSchema:
+          type: object
+          additionalProperties: true
+        inputExamples:
+          type: array
+          items: {}
+        limitations:
+          type: array
+          items:
+            type: string
+        supportsCancel:
+          type: boolean
+          description: 供应商是否支持取消；接受取消请求不代表已停止或免除供应商采购费用。
+        behavior:
+          $ref: "#/components/schemas/ToolBehavior"
+        delivery:
+          $ref: "#/components/schemas/ToolDelivery"
+    ReuseScope:
+      type: string
+      enum:
+        - disabled
+        - workspace
+        - shared
+      description: disabled 禁止对应的跨 Run 优化；workspace 按已验证调用主体私有复用（账户用 Workspace，钱包用网络与地址）；shared 仅在业务语义、权限和供应商许可均允许时使用。原 Run 幂等与取回不受禁用影响。
+    ToolBehavior:
+      type: object
+      required:
+        - kind
+        - executionMode
+        - sideEffects
+        - cacheScope
+        - coalesceScope
+      description: 解析后固定到工具版本。类型、执行方式、副作用及两项复用策略互相独立；未配置复用许可时两项为 disabled，供应商 TTL 不授予许可。生成默认独立创作，转换只有内容身份固定、确定性且有许可时才可复用；不得按类型名称或相同输入自动推断。
+      properties:
+        kind:
+          type: string
+          enum:
+            - query
+            - generate
+            - transform
+        executionMode:
+          type: string
+          enum:
+            - sync
+            - async
+          description: 供应商执行协议；sync 一次请求取得终态，async 保存任务身份后轮询。两者在平台都可能返回 202，平台异步响应不等于供应商为 async。
+        sideEffects:
+          type: boolean
+          description: 是否修改外部业务状态，不包含供应商内部任务及采购计费。为 true 时要求个人 Workspace 余额与工具执行权限，关闭缓存与合并。浏览器工具可能写入外部站点。
+        cacheScope:
+          $ref: "#/components/schemas/ReuseScope"
+        coalesceScope:
+          $ref: "#/components/schemas/ReuseScope"
+    ToolDelivery:
+      type: object
+      required:
+        - supportsArtifacts
+        - windowSeconds
+      properties:
+        supportsArtifacts:
+          type: boolean
+          description: 是否可能交付文件引用；false 时结果不得包含 artifacts。具体必需文件由工具契约说明，不因 true 强制每次都有文件。
+        windowSeconds:
+          type: integer
+          format: int32
+          minimum: 1
+          description: 首次允许交付时开始的有界取回窗口，与缓存 TTL 和执行期限独立。接入时配置，不能由轮询续期；必需文件有效期须覆盖完整窗口，付款等待不能缩短此承诺。
+    RunStatus:
+      type: string
+      enum:
+        - QUEUED
+        - SUBMITTING
+        - RUNNING
+        - WAITING_PROVIDER
+        - SUCCEEDED
+        - FAILED
+        - CANCELED
+        - TIMED_OUT
+        - UNKNOWN
+    BillingStatus:
+      description: 账单与执行状态独立；工具契约允许时，已核实用量的失败或取消 Run 也可结算。
+      type: string
+      enum:
+        - HELD
+        - SETTLED
+        - RELEASED
+        - REVIEW
+    Billing:
+      type: object
+      required:
+        - status
+        - currency
+        - priceRevision
+        - maxChargeMicros
+        - heldMicros
+        - chargedMicros
+        - refundedMicros
+      properties:
+        status:
+          $ref: "#/components/schemas/BillingStatus"
+        currency:
+          type: string
+          enum:
+            - USD
+            - USDC
+        priceRevision:
+          type: string
+        maxChargeMicros:
+          $ref: "#/components/schemas/Micros"
+        heldMicros:
+          description: 当前仍预留的金额。结算或释放后为 0；未使用预留的释放不是退款。
+          $ref: "#/components/schemas/Micros"
+        chargedMicros:
+          $ref: "#/components/schemas/Micros"
+        refundedMicros:
+          $ref: "#/components/schemas/Micros"
+    RunSummary:
+      type: object
+      required:
+        - runId
+        - toolId
+        - toolRevision
+        - status
+        - billing
+        - createdAt
+        - updatedAt
+      properties:
+        runId:
+          type: string
+        toolId:
+          type: string
+        toolRevision:
+          type: string
+        toolName:
+          type: string
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        billing:
+          $ref: "#/components/schemas/Billing"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        cancelRequestedAt:
+          type: string
+          format: date-time
+    RunResult:
+      type: object
+      description: 结果可用性与 Run/Billing 状态独立。available 时服务端必须返回 output（允许 JSON null）和 deliveryUntil，并满足工具必需产物要求；其他状态不返回 output 或 artifacts。原 Run 取回不重新执行或收费，窗口内必需文件失效时不得仅凭 JSON 尚存继续宣称 available。浏览器会话在费用预留时可交付私有连接凭证，关闭或到期后凭证过期；费用另按已确认用量结算。
+      required:
+        - status
+      oneOf:
+        - required:
+            - output
+            - deliveryUntil
+          properties:
+            status:
+              type: string
+              enum:
+                - available
+        - properties:
+            status:
+              type: string
+              enum:
+                - pending
+                - expired
+                - unavailable
+          not:
+            anyOf:
+              - required:
+                  - output
+              - required:
+                  - artifacts
+      properties:
+        status:
+          type: string
+          enum:
+            - pending
+            - available
+            - expired
+            - unavailable
+        resultId:
+          type: string
+        output:
+          description: 按工具 outputSchema 校验的合法 JSON 业务值，available 时必须存在；可为文本或 JSON null。工具承诺交付的文件用 artifacts 引用，不内嵌二进制或复制下载 URL，关联时使用 artifactId；查询返回的网页与原始媒体来源 URL 仍可保留在业务 output。
+        deliveryUntil:
+          type: string
+          format: date-time
+          description: 本 Run 首次允许交付时按固定工具窗口计算的保证取回截止时间；available 时必填，查询不续期。超过此时间不再保证可用，须按原对象实际状态返回，不能自动新建付费 Run。
+        artifacts:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/ResultArtifact"
+          description: 仅 available 且工具 supportsArtifacts=true 时提供；artifactId 在同一结果内唯一，必需文件必须齐全且 expiresAt 不早于 deliveryUntil。不建立独立文件管理接口。
+        dataFetchedAt:
+          type: string
+          format: date-time
+          description: 查询数据的取得时间；生成/转换不伪造数据新鲜度，不适用时省略。
+        source:
+          type: object
+          required:
+            - providerId
+            - toolId
+          properties:
+            providerId:
+              type: string
+            toolId:
+              type: string
+    ResultArtifact:
+      type: object
+      required:
+        - artifactId
+        - mediaType
+        - url
+        - expiresAt
+      description: 供应商直接交付的文件引用，平台只保存元信息。权限由所属 Run 验证；URL 可能带下载授权，按敏感数据保护，禁止携带平台或供应商 API Key。未知可取回期限不能填永久有效，不支持依赖另行供应商认证的文件交付。
+      properties:
+        artifactId:
+          type: string
+          minLength: 1
+          description: 同一结果内稳定的文件标识，用于关联业务输出，不是可独立管理的外部资源。
+        mediaType:
+          type: string
+          minLength: 1
+          description: 文件媒体类型，例如 image/png、audio/mpeg、application/pdf。
+        url:
+          type: string
+          format: uri
+          pattern: ^https://
+          description: 经审核的供应商下载地址，无需额外供应商凭证。客户端不得附带平台 Authorization；平台不代理下载、不自动付费续期，链接转发与撤销能力由供应商决定。
+        expiresAt:
+          type: string
+          format: date-time
+          description: 供应商明确有效期，或其可核对留存承诺内的保守截止时间；不得晚于已知链接有效期。复用时重新检查能否覆盖新 Run 的完整交付窗口，轮询不延长。
+        name:
+          type: string
+        sizeBytes:
+          type: string
+          pattern: "^(0|[1-9][0-9]*)$"
+          description: 供应商可确认的文件字节数，未知省略；不是平台数据库托管体积。
+    Run:
+      allOf:
+        - $ref: "#/components/schemas/RunSummary"
+        - type: object
+          required:
+            - result
+          properties:
+            payment:
+              $ref: "#/components/schemas/WalletPayment"
+            input:
+              description: 该用户提交并规范化的工具输入；不含供应商凭证。
+            result:
+              $ref: "#/components/schemas/RunResult"
+            error:
+              type: object
+              required:
+                - code
+                - message
+                - retryable
+              properties:
+                code:
+                  type: string
+                message:
+                  type: string
+                retryable:
+                  type: boolean
+            pollAfterMs:
+              type: integer
+              format: int32
+              minimum: 0
+    CacheControl:
+      type: object
+      description: 只能收紧固定工具的复用策略，不能开启被禁用的缓存或合并。省略等于 default；cacheScope=disabled 时 default 且无 maxAgeSeconds 是空操作，maxAgeSeconds 返回输入错误。refresh 固定首次受理的刷新边界，仅在工具允许合并且原操作在边界后开始时才可挂接；不改写原 Run。
+      oneOf:
+        - properties:
+            mode:
+              type: string
+              enum:
+                - default
+        - required:
+            - mode
+          properties:
+            mode:
+              type: string
+              enum:
+                - refresh
+          not:
+            required:
+              - maxAgeSeconds
+      properties:
+        mode:
+          type: string
+          default: default
+          enum:
+            - default
+            - refresh
+        maxAgeSeconds:
+          type: integer
+          format: int32
+          minimum: 1
+          description: 仅 mode=default 且工具启用缓存时允许；只收紧工具 TTL。mode=refresh 禁止本字段，由服务端执行跨字段校验。
+    RunRequest:
+      type: object
+      description: 完整请求在 JSON 规范化后及补齐工具与缓存默认值后均最多 1 MiB（1048576 字节），按数字展开、字符串转义后的紧凑 JSON 计数；超过时返回 json_too_large。查询、生成、转换共用提交契约；行为与交付规则取自固定工具版本，不由请求覆盖。平台不接受工作流或跨 Run 依赖，调用方自行传递符合 Schema 的输入。
+      required:
+        - toolId
+        - toolRevision
+        - priceRevision
+        - input
+        - idempotencyKey
+        - maxChargeMicros
+        - funding
+      properties:
+        toolId:
+          type: string
+        toolRevision:
+          type: string
+        priceRevision:
+          type: string
+        input:
+          description: 按 inspect 的输入 Schema 校验。
+        idempotencyKey:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: 同主体同 key 同有效请求返回原 Run，不重复执行或收费；同 key 改参数冲突。新 key 表达新任务，是否复用由工具策略决定；默认生成工具即使输入相同也独立创作。
+        maxChargeMicros:
+          $ref: "#/components/schemas/Micros"
+        funding:
+          type: object
+          required:
+            - mode
+          properties:
+            mode:
+              type: string
+              enum:
+                - balance
+                - per_run
+        cacheControl:
+          $ref: "#/components/schemas/CacheControl"
+    RunPage:
+      type: object
+      required:
+        - items
+        - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RunSummary"
+        nextCursor:
+          type: string
+          nullable: true

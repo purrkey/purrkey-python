@@ -1,0 +1,193 @@
+# Async twin of _client.py: keep the two in step (tests/test_client.py checks the method lists).
+from __future__ import annotations
+
+import asyncio
+import time
+from typing import Any, cast
+
+import httpx
+
+from ._shared import (
+    DEFAULT_BASE_URL,
+    DEFAULT_TIMEOUT,
+    FINAL_RUN_STATUSES,
+    backoff,
+    build_run_request,
+    client_headers,
+    drop_none,
+    network_error,
+    poll_delay,
+    resolve_api_key,
+    response_error,
+    retry_after,
+)
+from .types import (
+    Balance,
+    CacheControl,
+    DiscoverResponse,
+    ProviderCatalog,
+    PublicCatalog,
+    PublicEndpointPage,
+    PublicRankings,
+    Run,
+    RunPage,
+    RunRequest,
+    ToolInspection,
+    ToolPage,
+)
+
+
+class AsyncPurrkey:
+    """Asynchronous Purrkey client, with the same methods as ``Purrkey``.
+
+    Every operation is safe to repeat: reads have no side effects and Run
+    submissions are deduplicated by their idempotency key, so network errors,
+    HTTP 429 and 5xx are retried up to ``max_retries`` times.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: float = DEFAULT_TIMEOUT,
+        max_retries: int = 2,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._max_retries = max_retries
+        self._http = http_client or httpx.AsyncClient(timeout=timeout)
+        self._base_url = base_url.rstrip("/")
+        self._headers = client_headers(resolve_api_key(api_key))
+
+    async def __aenter__(self) -> AsyncPurrkey:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.close()
+
+    async def close(self) -> None:
+        await self._http.aclose()
+
+    async def discover(
+        self,
+        query: str,
+        *,
+        limit: int | None = None,
+        provider_id: str | None = None,
+        category: str | None = None,
+    ) -> DiscoverResponse:
+        """Find tool candidates for one task. Free."""
+        body = drop_none({"query": query, "limit": limit, "providerId": provider_id, "category": category})
+        return cast(DiscoverResponse, await self._request("POST", "/v1/discover", json=body))
+
+    async def inspect(self, tool_id: str, *, tool_revision: str | None = None) -> ToolInspection:
+        """Read a tool's exact schema, price and delivery rules. Free."""
+        body = drop_none({"toolId": tool_id, "toolRevision": tool_revision})
+        return cast(ToolInspection, await self._request("POST", "/v1/inspect", json=body))
+
+    async def run(
+        self,
+        tool_id: str,
+        input: Any,
+        *,
+        max_charge_micros: int | str | None = None,
+        idempotency_key: str | None = None,
+        tool_revision: str | None = None,
+        cache_control: CacheControl | None = None,
+        wait: bool = True,
+        timeout: float = 120.0,
+        poll_interval: float = 1.0,
+    ) -> Run:
+        """Inspect the tool, submit a Run from the account balance and, by
+        default, wait for a final status.
+
+        ``max_charge_micros`` (1 USD = 1000000) is optional for tools priced per
+        call and required when the price depends on the input. A lost response
+        is retried with the same ``idempotency_key``, so the task is never
+        bought twice.
+        """
+        inspection = await self.inspect(tool_id, tool_revision=tool_revision)
+        request = build_run_request(
+            inspection,
+            input,
+            max_charge_micros=max_charge_micros,
+            idempotency_key=idempotency_key,
+            cache_control=cache_control,
+        )
+        run = await self.submit_run(request)
+        if not wait:
+            return run
+        return await self.wait_for_run(run["runId"], timeout=timeout, poll_interval=poll_interval)
+
+    async def submit_run(self, request: RunRequest) -> Run:
+        """Submit a prepared RunRequest. Prefer ``run`` unless you build requests yourself."""
+        return cast(Run, await self._request("POST", "/v1/runs", json=request))
+
+    async def get_run(self, run_id: str) -> Run:
+        """Read a Run and its current result. Free."""
+        return cast(Run, await self._request("GET", f"/v1/runs/{run_id}"))
+
+    async def wait_for_run(self, run_id: str, *, timeout: float = 120.0, poll_interval: float = 1.0) -> Run:
+        """Poll until the Run reaches a final status. On timeout, return the Run as it is."""
+        deadline = time.monotonic() + timeout
+        run = await self.get_run(run_id)
+        while run["status"] not in FINAL_RUN_STATUSES and time.monotonic() < deadline:
+            await asyncio.sleep(poll_delay(run, poll_interval, deadline - time.monotonic()))
+            run = await self.get_run(run_id)
+        return run
+
+    async def cancel_run(self, run_id: str) -> Run:
+        """Request cancellation. Read the returned billing; a request is not a refund."""
+        return cast(Run, await self._request("POST", f"/v1/runs/{run_id}/cancel"))
+
+    async def list_runs(self, **params: Any) -> RunPage:
+        """List your Runs. Filters: status, activeOnly, toolId, createdFrom, createdTo, cursor, limit."""
+        return cast(RunPage, await self._request("GET", "/v1/runs", params=params))
+
+    async def balance(self) -> Balance:
+        return cast(Balance, await self._request("GET", "/v1/balance"))
+
+    async def list_tools(self, **params: Any) -> ToolPage:
+        """Filters: providerId, category, cursor, limit."""
+        return cast(ToolPage, await self._request("GET", "/v1/tools", params=params))
+
+    async def list_providers(self) -> ProviderCatalog:
+        return cast(ProviderCatalog, await self._request("GET", "/v1/providers"))
+
+    async def catalog(self) -> PublicCatalog:
+        return cast(PublicCatalog, await self._request("GET", "/v1/catalog"))
+
+    async def platform_endpoints(self, platform: str, **params: Any) -> PublicEndpointPage:
+        path = f"/v1/catalog/{platform}/endpoints"
+        return cast(PublicEndpointPage, await self._request("GET", path, params=params))
+
+    async def rankings(self) -> PublicRankings:
+        return cast(PublicRankings, await self._request("GET", "/v1/rankings"))
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        query = drop_none(params or {}) or None
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = await self._http.request(
+                    method, self._base_url + path, json=json, params=query, headers=self._headers
+                )
+            except httpx.TransportError as cause:
+                if attempt < self._max_retries:
+                    await asyncio.sleep(backoff(attempt))
+                    continue
+                raise network_error(cause) from cause
+            if response.is_success:
+                return response.json()
+            error = response_error(response)
+            if error.retryable and attempt < self._max_retries:
+                await asyncio.sleep(retry_after(response) or backoff(attempt))
+                continue
+            raise error
+        raise AssertionError("unreachable")
